@@ -1,10 +1,10 @@
 package amoba.game;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.EnumMap;
 import java.util.Locale;
 import java.util.Map;
-import java.util.function.Function;
 
 import amoba.ai.RandomAI;
 import amoba.board.Board;
@@ -24,11 +24,14 @@ public class AmobaGame {
 
     private static final int DEFAULT_HIGHSCORE_LIMIT = 10;
     private static final int MIN_LEP_PARTS = 2;
+    private static final int ARG_MIN = 2;
     private static final String AI_NAME = "Gép";
 
     private final ConsoleUI ui = new ConsoleUI();
     private final RandomAI ai = new RandomAI();
     private final ScoreService scoreService = new ScoreService();
+
+    private Map<Command, CommandHandler> handlers;
 
     private Board board;
     private String humanName = "Játékos";
@@ -37,22 +40,34 @@ public class AmobaGame {
         LEP, SAVE, LOAD, SAVEXML, LOADXML, HIGHSCORE, QUIT, POSITION
     }
 
-    private Map<Command, Function<String[], Boolean>> commandHandlers;
+    private enum TurnResult {
+        KEEP_TURN,
+        MOVE_DONE_CONTINUE,
+        MOVE_DONE_STOP
+    }
+
+    @FunctionalInterface
+    private interface CommandHandler {
+        TurnResult handle(String... parts) throws IOException;
+    }
 
     public void start() {
-        initCommands();
+        initHandlers();
+        setupBoard();
+        gameLoop();
+    }
+
+    private void setupBoard() {
         ui.println("Amőba (NxM)");
-        ui.println("Szabály: csak már lerakott jelekhez szomszédosan (átlós is) lehet rakni. 5 egymás után = győzelem.");
-        ui.println("");
+        ui.println("Szabály: csak már lerakott jelekhez szomszédosan (átlós is) lehet rakni. 5 egymás után = győzelem.\n");
 
         String name = ui.ask("Add meg a neved (Enter = Játékos): ").trim();
         if (!name.isEmpty()) {
             humanName = name;
         }
 
-        String load = ui.ask("Betöltés TXT-ből? (y/n) ").trim().toLowerCase(Locale.ROOT);
-        if (load.startsWith("y")) {
-            loadBoardInteractive();
+        if (ui.ask("Betöltés TXT-ből? (y/n) ").trim().toLowerCase(Locale.ROOT).startsWith("y")) {
+            loadBoardFromTxtInteractive();
         } else {
             board = createBoardInteractive();
         }
@@ -62,43 +77,27 @@ public class AmobaGame {
             board.place(Cell.X, center);
             ui.println("Automatikus kezdő lépés X középen: " + formatPos(center));
         }
-
-        runLoop();
-        ui.println("Játék vége. Köszönöm a játékot!");
     }
 
-    private void initCommands() {
-        commandHandlers = new EnumMap<>(Command.class);
-        commandHandlers.put(Command.LEP, this::handleLep);
-        commandHandlers.put(Command.SAVE, this::handleSave);
-        commandHandlers.put(Command.LOAD, this::handleLoad);
-        commandHandlers.put(Command.SAVEXML, this::handleSaveXml);
-        commandHandlers.put(Command.LOADXML, this::handleLoadXml);
-        commandHandlers.put(Command.HIGHSCORE, this::handleHighscore);
-        commandHandlers.put(Command.QUIT, this::handleQuit);
-        // POSITION: külön kezelem a fallback-ben
+    private void initHandlers() {
+        handlers = new EnumMap<>(Command.class);
+        handlers.put(Command.LEP, this::handleLep);
+        handlers.put(Command.SAVE, this::handleSave);
+        handlers.put(Command.LOAD, this::handleLoad);
+        handlers.put(Command.SAVEXML, this::handleSaveXml);
+        handlers.put(Command.LOADXML, this::handleLoadXml);
+        // Lambda – eldobja a kapott parts tömböt, metódus paraméter nélkül:
+        handlers.put(Command.HIGHSCORE, p -> handleHighscore());
+        handlers.put(Command.QUIT, p -> handleQuit());
+        // POSITION külön kezelve
     }
 
-    private void runLoop() {
-        Cell current = Cell.O;
-        boolean running = true;
-        while (running) {
-            ui.println("");
-            ui.println(board.render());
-            ui.println("Parancsok: lep <b3> | save <f.txt> | load <f.txt> | savexml <f.xml> |");
-            ui.println("           loadxml <f.xml> | highscore | quit | <pozíció pl. b3>");
-
-            running = (current == Cell.X) ? humanTurn() : aiTurn();
-            current = (current == Cell.X) ? Cell.O : Cell.X;
-        }
-    }
-
-    private void loadBoardInteractive() {
+    private void loadBoardFromTxtInteractive() {
         String file = ui.ask("Fájlnév (pl. input.txt): ").trim();
         try {
             board = FileIO.loadFromTxt(Path.of(file));
             ui.println("Pálya betöltve.");
-        } catch (Exception e) {
+        } catch (IllegalArgumentException | IOException e) {
             ui.println("Betöltési hiba: " + e.getMessage());
             LOGGER.warn("Betöltési hiba", e);
             board = createBoardInteractive();
@@ -106,50 +105,95 @@ public class AmobaGame {
     }
 
     private Board createBoardInteractive() {
-        int n = parseInt(ui.ask("N (4 <= M <= N <= 25): "));
-        int m = parseInt(ui.ask("M (4 <= M <= N <= 25): "));
-        try {
-            return new Board(n, m);
-        } catch (IllegalArgumentException e) {
-            ui.println("Hibás méretek: " + e.getMessage());
-            return createBoardInteractive();
-        }
-    }
-
-    private int parseInt(String s) {
-        try {
-            return Integer.parseInt(s.trim());
-        } catch (NumberFormatException e) {
-            ui.println("Adj meg egy számot!");
-            return parseInt(ui.ask("> "));
-        }
-    }
-
-    private boolean humanTurn() {
         while (true) {
-            String cmdLine = ui.ask(humanName + " (X) lépése: ").trim();
-            if (cmdLine.isEmpty()) {
-                continue;
-            }
-            String[] parts = cmdLine.split("\\s+");
-            Command command = parseCommand(parts[0]);
-            if (command == Command.POSITION) {
-                if (handlePosition(parts[0])) {
-                    return true;
-                }
-                continue;
-            }
-            Function<String[], Boolean> handler = commandHandlers.get(command);
+            int n = parsePositiveInt(ui.ask("N (4 <= M <= N <= 25): "));
+            int m = parsePositiveInt(ui.ask("M (4 <= M <= N <= 25): "));
             try {
-                boolean continueGame = handler.apply(parts);
-                return continueGame;
-            } catch (Exception e) {
-                ui.println("Hiba: " + e.getMessage());
+                return new Board(n, m);
+            } catch (IllegalArgumentException e) {
+                ui.println("Hibás méretek: " + e.getMessage());
             }
         }
     }
 
-    private Command parseCommand(String token) {
+    private int parsePositiveInt(String input) {
+        String current = input;
+        while (true) {
+            try {
+                return Integer.parseInt(current.trim());
+            } catch (NumberFormatException e) {
+                ui.println("Adj meg egy számot!");
+                current = ui.ask("> ");
+            }
+        }
+    }
+
+    private void gameLoop() {
+        Cell turn = Cell.X;
+        boolean running = true;
+        while (running) {
+            ui.println("");
+            ui.println(board.render());
+            ui.println("Parancsok: lep <b3> | save <f.txt> | load <f.txt> | savexml <f.xml> |");
+            ui.println("           loadxml <f.xml> | highscore | quit | <pozíció pl. b3>");
+
+            if (turn == Cell.X) {
+                TurnResult r = humanTurn();
+                if (r == TurnResult.MOVE_DONE_STOP) {
+                    running = false;
+                } else if (r == TurnResult.MOVE_DONE_CONTINUE) {
+                    turn = Cell.O;
+                }
+            } else {
+                running = aiTurn();
+                if (running) {
+                    turn = Cell.X;
+                }
+            }
+        }
+    }
+
+    private TurnResult humanTurn() {
+        TurnResult result = TurnResult.KEEP_TURN;
+        boolean waiting = true;
+        while (waiting) {
+            String line = ui.ask(humanName + " (X) lépése: ").trim();
+            if (line.isEmpty()) {
+                continue;
+            }
+            String[] parts = line.split("\\s+");
+            Command cmd = resolveCommand(parts[0]);
+
+            try {
+                result = executeCommand(cmd, parts);
+            } catch (IllegalArgumentException e) {
+                ui.println("Hiba: " + e.getMessage());
+                continue;
+            } catch (IOException e) {
+                ui.println("I/O hiba: " + e.getMessage());
+                LOGGER.warn("I/O hiba", e);
+                continue;
+            }
+
+            if (result != TurnResult.KEEP_TURN) {
+                waiting = false;
+            }
+        }
+        return result;
+    }
+
+    private TurnResult executeCommand(Command cmd, String... parts) throws IOException {
+        if (cmd == Command.POSITION) {
+            return handlePosition(parts[0]);
+        }
+        CommandHandler handler = handlers.get(cmd);
+        if (handler == null) {
+            throw new IllegalArgumentException("Ismeretlen parancs");
+        }
+        return handler.handle(parts);
+    }
+
+    private Command resolveCommand(String token) {
         String t = token.toLowerCase(Locale.ROOT);
         return switch (t) {
             case "lep" -> Command.LEP;
@@ -163,81 +207,73 @@ public class AmobaGame {
         };
     }
 
-    private Boolean handleLep(String[] parts) {
+    private TurnResult handleLep(String... parts) {
         if (parts.length < MIN_LEP_PARTS) {
             ui.println("Használat: lep b3");
-            return true;
+            return TurnResult.KEEP_TURN;
         }
         Position p = ui.parsePosition(parts[1], board.rows(), board.cols());
         if (!board.legalPositionsByAdjacency().contains(p)) {
             ui.println("Nem szomszédos mező.");
-            return true;
+            return TurnResult.KEEP_TURN;
         }
         board.place(Cell.X, p);
-        return !checkWin(Cell.X, p, humanName);
+        return afterMove(Cell.X, p, humanName);
     }
 
-    private Boolean handleSave(String[] parts) {
-        if (parts.length < 2) {
+    private TurnResult handleSave(String... parts) throws IOException {
+        if (parts.length < ARG_MIN) {
             ui.println("Használat: save állapot.txt");
-            return true;
+            return TurnResult.KEEP_TURN;
         }
-        try {
-            FileIO.saveToTxt(board, Path.of(parts[1]));
-            ui.println("Mentve TXT-be.");
-        } catch (Exception e) {
-            ui.println("I/O hiba: " + e.getMessage());
-        }
-        return true;
+        FileIO.saveToTxt(board, Path.of(parts[1]));
+        ui.println("Mentve TXT-be.");
+        return TurnResult.KEEP_TURN;
     }
 
-    private Boolean handleLoad(String[] parts) {
-        if (parts.length < 2) {
+    private TurnResult handleLoad(String... parts) throws IOException {
+        if (parts.length < ARG_MIN) {
             ui.println("Használat: load állapot.txt");
-            return true;
+            return TurnResult.KEEP_TURN;
         }
         try {
             board = FileIO.loadFromTxt(Path.of(parts[1]));
             ui.println("Betöltve TXT-ből.");
-        } catch (Exception e) {
+        } catch (IllegalArgumentException e) {
             ui.println("Betöltési hiba: " + e.getMessage());
         }
-        return true;
+        return TurnResult.KEEP_TURN;
     }
 
-    private Boolean handleSaveXml(String[] parts) {
-        if (parts.length < 2) {
+    private TurnResult handleSaveXml(String... parts) throws IOException {
+        if (parts.length < ARG_MIN) {
             ui.println("Használat: savexml állapot.xml");
-            return true;
+            return TurnResult.KEEP_TURN;
         }
-        try {
-            XmlPersistence.saveToXml(board, Path.of(parts[1]));
-            ui.println("Mentve XML-be.");
-        } catch (Exception e) {
-            ui.println("I/O hiba: " + e.getMessage());
-        }
-        return true;
+        XmlPersistence.saveToXml(board, Path.of(parts[1]));
+        ui.println("Mentve XML-be.");
+        return TurnResult.KEEP_TURN;
     }
 
-    private Boolean handleLoadXml(String[] parts) {
-        if (parts.length < 2) {
+    private TurnResult handleLoadXml(String... parts) throws IOException {
+        if (parts.length < ARG_MIN) {
             ui.println("Használat: loadxml állapot.xml");
-            return true;
+            return TurnResult.KEEP_TURN;
         }
         try {
             board = XmlPersistence.loadFromXml(Path.of(parts[1]));
             ui.println("Betöltve XML-ből.");
-        } catch (Exception e) {
+        } catch (IllegalArgumentException e) {
             ui.println("Betöltési hiba: " + e.getMessage());
         }
-        return true;
+        return TurnResult.KEEP_TURN;
     }
 
-    private Boolean handleHighscore(String[] parts) {
+    private TurnResult handleHighscore() {
         Map<String, Integer> scores = scoreService.highScoresTop(DEFAULT_HIGHSCORE_LIMIT);
         if (scores.isEmpty()) {
             ui.println("Nincs high score adat.");
-            return true;
+            return TurnResult.KEEP_TURN;
         }
         ui.println("High score:");
         int rank = 1;
@@ -245,27 +281,22 @@ public class AmobaGame {
             ui.println(rank + ". " + e.getKey() + " - " + e.getValue());
             rank++;
         }
-        return true;
+        return TurnResult.KEEP_TURN;
     }
 
-    private Boolean handleQuit(String[] parts) {
+    private TurnResult handleQuit() {
         ui.println("Kilépés...");
-        return false;
+        return TurnResult.MOVE_DONE_STOP;
     }
 
-    private boolean handlePosition(String token) {
-        try {
-            Position p = ui.parsePosition(token, board.rows(), board.cols());
-            if (!board.legalPositionsByAdjacency().contains(p)) {
-                ui.println("Nem szomszédos mező.");
-                return true;
-            }
-            board.place(Cell.X, p);
-            return !checkWin(Cell.X, p, humanName);
-        } catch (IllegalArgumentException e) {
-            ui.println("Ismeretlen parancs vagy pozíció.");
-            return true;
+    private TurnResult handlePosition(String token) {
+        Position p = ui.parsePosition(token, board.rows(), board.cols());
+        if (!board.legalPositionsByAdjacency().contains(p)) {
+            ui.println("Nem szomszédos mező.");
+            return TurnResult.KEEP_TURN;
         }
+        board.place(Cell.X, p);
+        return afterMove(Cell.X, p, humanName);
     }
 
     private boolean aiTurn() {
@@ -276,22 +307,27 @@ public class AmobaGame {
         }
         board.place(Cell.O, aiMove);
         ui.println(AI_NAME + " (O) lépése: " + formatPos(aiMove));
-        return !checkWin(Cell.O, aiMove, AI_NAME);
+        if (board.hasFiveInARow(Cell.O, aiMove)) {
+            ui.println(board.render());
+            ui.println(AI_NAME + " nyert!");
+            scoreService.recordWin(AI_NAME);
+            return false;
+        }
+        return true;
     }
 
-    private boolean checkWin(Cell cell, Position p, String playerName) {
+    private TurnResult afterMove(Cell cell, Position p, String playerName) {
         if (board.hasFiveInARow(cell, p)) {
             ui.println(board.render());
             ui.println(playerName + " nyert!");
             scoreService.recordWin(playerName);
-            return true;
+            return TurnResult.MOVE_DONE_STOP;
         }
-        return false;
+        return TurnResult.MOVE_DONE_CONTINUE;
     }
 
     private String formatPos(Position p) {
         char col = (char) ('a' + p.col());
-        int row = p.row() + 1;
-        return String.valueOf(col) + row;
+        return col + Integer.toString(p.row() + 1);
     }
 }
