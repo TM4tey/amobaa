@@ -8,7 +8,7 @@ import java.util.Set;
 import amoba.board.Board;
 import amoba.model.Position;
 
-public class RandomAI {
+public class    RandomAI {
 
     private final SecureRandom random = new SecureRandom();
 

@@ -17,7 +17,9 @@ import amoba.model.Position;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-@SuppressWarnings({"PMD.TooManyMethods"})
+/**
+ * Amőba játék fő vezérlő osztály.
+ */
 public class AmobaGame {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(AmobaGame.class);
@@ -29,8 +31,7 @@ public class AmobaGame {
 
     private final ConsoleUI ui = new ConsoleUI();
     private final RandomAI ai = new RandomAI();
-    private final ScoreService scoreService = new ScoreService();
-
+    private final ScoreService scoreService = new ScoreService(); // TXT alapú score tárolás
     private Map<Command, CommandHandler> handlers;
 
     private Board board;
@@ -59,7 +60,8 @@ public class AmobaGame {
 
     private void setupBoard() {
         ui.println("Amőba (NxM)");
-        ui.println("Szabály: csak már lerakott jelekhez szomszédosan (átlós is) lehet rakni. 5 egymás után = győzelem.\n");
+        ui.println("Szabály: csak már lerakott jelekhez szomszédosan (átlós is) lehet rakni." +
+                " 5 egymás után = győzelem.\n");
 
         String name = ui.ask("Add meg a neved (Enter = Játékos): ").trim();
         if (!name.isEmpty()) {
@@ -86,7 +88,6 @@ public class AmobaGame {
         handlers.put(Command.LOAD, this::handleLoad);
         handlers.put(Command.SAVEXML, this::handleSaveXml);
         handlers.put(Command.LOADXML, this::handleLoadXml);
-        // Lambda – eldobja a kapott parts tömböt, metódus paraméter nélkül:
         handlers.put(Command.HIGHSCORE, p -> handleHighscore());
         handlers.put(Command.QUIT, p -> handleQuit());
         // POSITION külön kezelve
@@ -134,8 +135,8 @@ public class AmobaGame {
         while (running) {
             ui.println("");
             ui.println(board.render());
-            ui.println("Parancsok: lep <b3> | save <f.txt> | load <f.txt> | savexml <f.xml> |");
-            ui.println("           loadxml <f.xml> | highscore | quit | <pozíció pl. b3>");
+            ui.println("Parancsok: lep <b3> | save <f.txt> | load <f.txt> | savexml <f.xml> |" +
+                    " loadxml <f.xml> | highscore | quit | <pozíció pl. b3>");
 
             if (turn == Cell.X) {
                 TurnResult r = humanTurn();
@@ -207,6 +208,8 @@ public class AmobaGame {
         };
     }
 
+    /* ===== Handler metódusok ===== */
+
     private TurnResult handleLep(String... parts) {
         if (parts.length < MIN_LEP_PARTS) {
             ui.println("Használat: lep b3");
@@ -250,8 +253,13 @@ public class AmobaGame {
             ui.println("Használat: savexml állapot.xml");
             return TurnResult.KEEP_TURN;
         }
-        XmlPersistence.saveToXml(board, Path.of(parts[1]));
-        ui.println("Mentve XML-be.");
+        try {
+            XmlPersistence.saveToXml(board, Path.of(parts[1]));
+            ui.println("Mentve XML-be.");
+        } catch (IOException e) {
+            ui.println("I/O hiba: " + e.getMessage());
+            LOGGER.warn("XML mentési hiba", e);
+        }
         return TurnResult.KEEP_TURN;
     }
 
@@ -263,8 +271,9 @@ public class AmobaGame {
         try {
             board = XmlPersistence.loadFromXml(Path.of(parts[1]));
             ui.println("Betöltve XML-ből.");
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException | IOException e) {
             ui.println("Betöltési hiba: " + e.getMessage());
+            LOGGER.warn("XML betöltési hiba", e);
         }
         return TurnResult.KEEP_TURN;
     }
@@ -298,6 +307,8 @@ public class AmobaGame {
         board.place(Cell.X, p);
         return afterMove(Cell.X, p, humanName);
     }
+
+    /* ===== AI és közös segéd ===== */
 
     private boolean aiTurn() {
         Position aiMove = ai.chooseMove(board);

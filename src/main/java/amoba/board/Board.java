@@ -8,7 +8,6 @@ import java.util.Set;
 import amoba.model.Cell;
 import amoba.model.Position;
 
-@SuppressWarnings("PMD.TooManyMethods")
 public class Board {
 
     private static final int WIN_LENGTH = 5;
